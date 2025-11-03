@@ -26,10 +26,83 @@ String setupUrl = "http://192.168.31.117:5000/api/devices/setup";
 // ===== HEARTBEAT =====
 String heartbeatUrl = "http://192.168.31.117:5000/api/devices/heartbeat";
 unsigned long lastHeartbeat = 0;
-const unsigned long HEARTBEAT_INTERVAL = 7200; // 2 hrs
+const unsigned long HEARTBEAT_INTERVAL = 120000;
 
 // ========== NFC CONTROL ==========
 String lastSentText = "None";
+unsigned long lastScanTime = 0;
+const unsigned long SCAN_DEBOUNCE_MS = 500; // prevent duplicate scans within 500ms
+bool cardWasPresent = false; // track card state for faster detection
+
+// ========== HARDWARE PINS ==========
+#define LED_R D8   // GPIO15
+#define LED_G D7   // GPIO13
+#define LED_B D0   // GPIO16
+#define BUZZER  D6 // GPIO12
+
+// beep length chosen: 100ms (you selected option A)
+const unsigned int BUZZ_BEEP_MS = 100;
+
+// ========== LED / BUZZER HELPERS ==========
+void ledOff() {
+  digitalWrite(LED_R, HIGH);
+  digitalWrite(LED_G, HIGH);
+  digitalWrite(LED_B, HIGH);
+}
+
+void ledOrange() {
+  digitalWrite(LED_R, LOW);
+  digitalWrite(LED_G, LOW);
+  digitalWrite(LED_B, HIGH);
+}
+
+void ledGreen() {
+  digitalWrite(LED_R, HIGH);
+  digitalWrite(LED_G, LOW);
+  digitalWrite(LED_B, HIGH);
+}
+
+void ledRed() {
+  digitalWrite(LED_R, LOW);
+  digitalWrite(LED_G, HIGH);
+  digitalWrite(LED_B, HIGH);
+}
+
+void ledBlue() {
+  digitalWrite(LED_R, HIGH);
+  digitalWrite(LED_G, HIGH);
+  digitalWrite(LED_B, LOW);
+}
+
+void buzzShort() {
+  // short beep; using tone() with duration
+  tone(BUZZER, 2500, BUZZ_BEEP_MS);
+  delay(5); // small gap to allow tone to start reliably
+}
+
+void blinkWifiWait() {
+  while (WiFi.status() != WL_CONNECTED) {
+    ledBlue();        // ON
+    delay(300);
+    ledOff();         // OFF
+    delay(300);
+  }
+
+  // when finally connects → show ORANGE for 1 sec then go idle
+  ledGreen();
+  delay(1000);
+}
+
+void blinkDuringScan() {
+  ledBlue();
+}
+
+void blinkWhileSaving() {
+  ledBlue();
+  delay(200);
+  ledOff();
+  delay(200);
+}
 
 // ========== FILE FUNCTIONS ==========
 void saveToFile(String path, String content) {
@@ -83,8 +156,21 @@ void sendHeartbeat() {
       saveToFile("/url.txt", baseUrl);
 
       Serial.println("🔄 token & url updated from heartbeat");
-    }
+    }else {
+  Serial.println("❌ Heartbeat failed. Trying setup again...");
+
+  if (!setupDevice(setupCode)) {        // if setup also failed
+    Serial.println("❌ Setup failed after heartbeat fail. Restarting...");
+    delay(3000);
+    ESP.restart();
   }
+}
+
+  } else {
+    Serial.println("❌ Heartbeat HTTP error. Trying setup again...");
+    setupDevice(setupCode);
+  }
+
   http.end();
 }
 
@@ -142,13 +228,21 @@ bool setupDevice(String setupCode) {
 
 // ========== SEND NFC TEXT ==========
 void sendTextToServer(String text) {
+  // Immediately: short beep + orange LED
+  buzzShort();
+  ledOrange();
+
+  // wait until wifi connects
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("❌ Wi-Fi not connected");
-    return;
+    Serial.println("⚠️ Waiting for WiFi...");
+    blinkWifiWait(); // blink blue until it connects
   }
 
   if (token == "" || baseUrl == "") {
     Serial.println("❌ Missing token or URL");
+    ledRed();
+    delay(3000);
+    ledOff();
     return;
   }
 
@@ -157,6 +251,9 @@ void sendTextToServer(String text) {
 
   if (!http.begin(client, baseUrl)) {
     Serial.println("❌ Invalid URL");
+    ledRed();
+    delay(3000);
+    ledOff();
     return;
   }
 
@@ -172,14 +269,33 @@ void sendTextToServer(String text) {
   serializeJson(doc, body);
 
   int code = http.POST(body);
+
+  String respStr = "";
   if (code > 0) {
-    Serial.println("✅ Attendance sent. Code: " + String(code));
-    Serial.println(http.getString());
+    respStr = http.getString();
+    Serial.println("HTTP POST code: " + String(code));
+    Serial.println("Response: " + respStr);
+
+    if (code == 200) {
+      // SUCCESS
+      ledGreen();
+      delay(3000);
+      ledOff();
+    } else {
+      // FAIL (any non-200)
+      ledRed();
+      delay(3000);
+      ledOff();
+    }
   } else {
     Serial.println("❌ POST error: " + String(http.errorToString(code)));
+    ledRed();
+    delay(3000);
+    ledOff();
   }
 
   http.end();
+  cardWasPresent = false;
 }
 
 // ========== NDEF TEXT DECODER ==========
@@ -201,18 +317,34 @@ String decodeNdefTextRecord(byte* payload, int payloadLength) {
 }
 
 // ========== WIFI & PORTAL ==========
+
 void setupWiFiAndPortal() {
   WiFiManager wm;
-
+  WiFi.mode(WIFI_STA);      // important!
   setupCode = readFromFile("/setupcode.txt");
 
   if (setupCode == "") {
     Serial.println("⚠️ No setup code found. Starting WiFi portal...");
+    Serial.println("🔵 Blue LED flashing...");
 
     WiFiManagerParameter setupCodeField("setupCode", "Enter Setup Code", "", 32);
     wm.addParameter(&setupCodeField);
 
-    if (!wm.autoConnect("Device-Setup")) {
+    wm.setConfigPortalBlocking(false);
+    wm.autoConnect("Device-Setup");
+
+    unsigned long portalStart = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - portalStart < 120000) {
+      wm.process();
+      // small non-blocking blink
+      ledBlue();
+      delay(100);
+      ledOff();
+      delay(100);
+      yield();
+    }
+
+    if (WiFi.status() != WL_CONNECTED) {
       Serial.println("❌ WiFi connection failed. Restarting...");
       ESP.restart();
     }
@@ -224,16 +356,23 @@ void setupWiFiAndPortal() {
       ESP.restart();
     }
 
+    Serial.println("💾 Saving credentials to ROM...");
     saveToFile("/setupcode.txt", setupCode);
     Serial.println("💾 Saved setup code: " + setupCode);
   } else {
     Serial.println("✅ Loaded setup code: " + setupCode);
-    wm.autoConnect("Device-Setup");
+
+    wm.setConfigPortalBlocking(true);  // normal mode now
+    if (!wm.autoConnect("Device-Setup")) {
+      Serial.println("❌ Failed to connect. Restarting...");
+      ESP.restart();
+    }
   }
 
   Serial.println("✅ Wi-Fi Connected: " + WiFi.localIP().toString());
   localIp = WiFi.localIP().toString();
 }
+
 
 // ========== SETUP ==========
 void setup() {
@@ -250,22 +389,24 @@ void setup() {
   chipId = String(ESP.getChipId());
   macAddress = WiFi.macAddress();
 
-  token = readFromFile("/token.txt");
-  baseUrl = readFromFile("/url.txt");
+  // initialize LED and buzzer pins
+  pinMode(LED_R, OUTPUT);
+  pinMode(LED_G, OUTPUT);
+  pinMode(LED_B, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+
+  ledOff();
+  digitalWrite(BUZZER, LOW);
 
   setupWiFiAndPortal();
 
-  if (token.length() > 0 && baseUrl.length() > 0) {
-    Serial.println("✅ Loaded saved credentials");
+  Serial.println("🔄 Refreshing token/url using saved setup code...");
+  if (setupDevice(setupCode)) {
+    Serial.println("🎉 Setup complete. Ready for NFC scanning!");
   } else {
-    Serial.println("🔑 Running setup process...");
-    if (setupDevice(setupCode)) {
-      Serial.println("🎉 Setup complete. Ready for NFC scanning!");
-    } else {
-      Serial.println("❌ Setup failed. Restarting...");
-      delay(3000);
-      ESP.restart();
-    }
+    Serial.println("❌ Setup failed. Restarting...");
+    delay(3000);
+    ESP.restart();
   }
 
   Serial.println("✅ System Ready for NFC Scanning...");
@@ -280,8 +421,15 @@ void loop() {
     lastHeartbeat = millis();
   }
 
-  // NFC TAG READ
-  if (nfc.tagPresent()) {
+  // NO LED HERE – idle = no light
+
+  bool tagNowPresent = nfc.tagPresent();
+
+  if (tagNowPresent && !cardWasPresent) {
+    // Card just appeared - read immediately without blocking loop
+    cardWasPresent = true;
+
+    ledOrange(); // ORANGE WHILE TAG IS PRESENT
     NfcTag tag = nfc.read();
 
     if (tag.hasNdefMessage()) {
@@ -302,22 +450,31 @@ void loop() {
           if (text.length() > 0) {
             Serial.println("📗 Scanned text: " + text);
 
-            if (text != lastSentText) {
-              sendTextToServer(text);
-              lastSentText = text;
-            } else {
-              Serial.println("⏭️ Duplicate scan skipped");
-            }
+      if (text != lastSentText && millis() - lastScanTime >= SCAN_DEBOUNCE_MS) {
+  sendTextToServer(text);
+  lastSentText = text;
+  lastScanTime = millis();
+
+  // ***** NEW line added *******
+  cardWasPresent = false;   // reset immediately after success/fail
+
+  ledOff(); // also turn LED off after sending
+} else {
+  Serial.println("⏭️ Duplicate scan skipped");
+}
+
           }
         }
       }
     } else {
       Serial.println("⚠️ No NDEF message found on tag");
     }
-
-    while (nfc.tagPresent()) delay(100);
+  }
+  else if (!tagNowPresent && cardWasPresent) {
+    cardWasPresent = false;
     Serial.println("Tag removed, ready for next scan.\n");
+    ledOff();   // turn off after tag removed
   }
 
-  delay(300);
+  delay(30);
 }
