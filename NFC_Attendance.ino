@@ -26,7 +26,8 @@ String setupUrl = "http://192.168.31.117:5000/api/devices/setup";
 // ===== HEARTBEAT =====
 String heartbeatUrl = "http://192.168.31.117:5000/api/devices/heartbeat";
 unsigned long lastHeartbeat = 0;
-const unsigned long HEARTBEAT_INTERVAL = 120000;
+const unsigned long HEARTBEAT_INTERVAL = 7000;
+
 
 // ========== NFC CONTROL ==========
 String lastSentText = "None";
@@ -35,10 +36,11 @@ const unsigned long SCAN_DEBOUNCE_MS = 500; // prevent duplicate scans within 50
 bool cardWasPresent = false; // track card state for faster detection
 
 // ========== HARDWARE PINS ==========
-#define LED_R D8   // GPIO15
-#define LED_G D7   // GPIO13
-#define LED_B D0   // GPIO16
-#define BUZZER  D6 // GPIO12
+#define LED_R D5   // GPIO14
+#define LED_G D6   // GPIO12
+#define LED_B D7   // GPIO13
+#define BUZZER  D8 // GPIO15
+
 
 // beep length chosen: 100ms (you selected option A)
 const unsigned int BUZZ_BEEP_MS = 100;
@@ -73,6 +75,14 @@ void ledBlue() {
   digitalWrite(LED_G, HIGH);
   digitalWrite(LED_B, LOW);
 }
+void ledIdle() {
+  // more soft gray (~20%)
+  analogWrite(LED_R, 800);
+  analogWrite(LED_G, 800);
+  analogWrite(LED_B, 800);
+}
+
+
 
 void buzzShort() {
   // short beep; using tone() with duration
@@ -149,6 +159,7 @@ void sendHeartbeat() {
 
     StaticJsonDocument<400> resp;
     if (deserializeJson(resp, res) == DeserializationError::Ok && resp["success"]) {
+
       token = resp["token"].as<String>();
       baseUrl = resp["url"].as<String>();
 
@@ -156,23 +167,29 @@ void sendHeartbeat() {
       saveToFile("/url.txt", baseUrl);
 
       Serial.println("🔄 token & url updated from heartbeat");
-    }else {
-  Serial.println("❌ Heartbeat failed. Trying setup again...");
 
-  if (!setupDevice(setupCode)) {        // if setup also failed
-    Serial.println("❌ Setup failed after heartbeat fail. Restarting...");
-    delay(3000);
-    ESP.restart();
-  }
-}
+    } else {
+
+      Serial.println("❌ Heartbeat failed. Trying setup again...");
+      if (!setupDevice(setupCode)) {
+        Serial.println("❌ Setup failed after heartbeat fail. Restarting...");
+        delay(3000);
+        ESP.restart();
+      }
+    }
 
   } else {
-    Serial.println("❌ Heartbeat HTTP error. Trying setup again...");
-    setupDevice(setupCode);
-  }
 
-  http.end();
+    Serial.println("❌ Heartbeat HTTP error. Trying setup again...");
+    if (!setupDevice(setupCode)) {
+      Serial.println("❌ Setup failed after HTTP error. Restarting...");
+      delay(3000);
+      ESP.restart();
+    }
+
+  }
 }
+
 
 // ========== SETUP API ==========
 bool setupDevice(String setupCode) {
@@ -278,6 +295,7 @@ void sendTextToServer(String text) {
 
     if (code == 200) {
       // SUCCESS
+      lastSentText = text;
       ledGreen();
       delay(3000);
       ledOff();
@@ -376,6 +394,8 @@ void setupWiFiAndPortal() {
 
 // ========== SETUP ==========
 void setup() {
+  analogWriteRange(1023);
+
   Serial.begin(115200);
   delay(1000);
   SPIFFS.begin();
@@ -415,6 +435,11 @@ void setup() {
 // ========== LOOP ==========
 void loop() {
 
+   // idle color if no tag present
+  if (! cardWasPresent) {
+    ledIdle();
+  }
+
   // ===== HEARTBEAT TIMER =====
   if (millis() - lastHeartbeat >= HEARTBEAT_INTERVAL) {
     sendHeartbeat();
@@ -451,7 +476,7 @@ void loop() {
             Serial.println("📗 Scanned text: " + text);
 
       if (text != lastSentText && millis() - lastScanTime >= SCAN_DEBOUNCE_MS) {
-  sendTextToServer(text);
+  // sendTextToServer(text);
   lastSentText = text;
   lastScanTime = millis();
 
@@ -461,6 +486,10 @@ void loop() {
   ledOff(); // also turn LED off after sending
 } else {
   Serial.println("⏭️ Duplicate scan skipped");
+  // after 3 seconds allow same card again
+  delay(3000);
+  cardWasPresent = false;
+  ledOff();
 }
 
           }
@@ -468,6 +497,11 @@ void loop() {
       }
     } else {
       Serial.println("⚠️ No NDEF message found on tag");
+
+  delay(500);          // small pause
+  cardWasPresent = false;
+  ledOff();
+  return;
     }
   }
   else if (!tagNowPresent && cardWasPresent) {
