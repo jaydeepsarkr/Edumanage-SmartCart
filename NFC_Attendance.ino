@@ -11,9 +11,10 @@
 // ========== NFC SETUP ==========
 PN532_I2C pn532_i2c(Wire);
 NfcAdapter nfc(pn532_i2c);
+WiFiManager wm;
 
 // ========== CONFIG ==========
-String deviceName = "Device 2";
+String deviceName = "Device 1";
 String setupCode = "";
 String token = "";
 String baseUrl = "";
@@ -130,6 +131,35 @@ String readFromFile(String path) {
   return content;
 }
 
+// helper to fully factory-reset device: erase SPIFFS + wifi creds + WiFiManager data, then restart
+void performFactoryReset() {
+  Serial.println("⚠️ Factory Reset initiated by server...");
+
+  // 1) Format SPIFFS (delete all stored files)
+  Serial.println("🗑️ Formatting SPIFFS (deleting ROM files)...");
+  SPIFFS.format();
+  delay(500);
+
+  // 2) Clear Wi-Fi credentials stored in flash
+  Serial.println("📡 Clearing Wi-Fi credentials...");
+  // 'true' requests persistent erase of stored Wi-Fi config
+  WiFi.disconnect(true);
+  delay(500);
+
+  // 3) Reset WiFiManager-stored settings (if any)
+  Serial.println("🔁 Resetting WiFiManager stored settings...");
+  wm.resetSettings(); // requires global wm
+  delay(500);
+
+  // optional: set wifi off to ensure clean restart
+  WiFi.mode(WIFI_OFF);
+  delay(200);
+
+  Serial.println("🔄 Restarting ESP to complete factory reset...");
+  delay(1500);
+  ESP.restart();
+}
+
 // ===== HEARTBEAT FN =====
 void sendHeartbeat() {
 
@@ -167,6 +197,12 @@ void sendHeartbeat() {
       saveToFile("/url.txt", baseUrl);
 
       Serial.println("🔄 token & url updated from heartbeat");
+bool factoryReset = resp["factoryReset"] | false;
+if (factoryReset) {
+  performFactoryReset(); // will not return (calls ESP.restart)
+}
+
+
 
     } else {
 
@@ -295,7 +331,6 @@ void sendTextToServer(String text) {
 
     if (code == 200) {
       // SUCCESS
-      lastSentText = text;
       ledGreen();
       delay(3000);
       ledOff();
@@ -337,7 +372,7 @@ String decodeNdefTextRecord(byte* payload, int payloadLength) {
 // ========== WIFI & PORTAL ==========
 
 void setupWiFiAndPortal() {
-  WiFiManager wm;
+
   WiFi.mode(WIFI_STA);      // important!
   setupCode = readFromFile("/setupcode.txt");
 
@@ -476,7 +511,7 @@ void loop() {
             Serial.println("📗 Scanned text: " + text);
 
       if (text != lastSentText && millis() - lastScanTime >= SCAN_DEBOUNCE_MS) {
-  // sendTextToServer(text);
+  sendTextToServer(text);
   lastSentText = text;
   lastScanTime = millis();
 
