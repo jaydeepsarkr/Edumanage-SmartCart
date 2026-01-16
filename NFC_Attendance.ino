@@ -7,6 +7,8 @@
 #include <WiFiManager.h>
 #include <FS.h>
 #include <ArduinoJson.h>
+#include <WiFiClientSecure.h>
+
 
 // ========== NFC SETUP ==========
 PN532_I2C pn532_i2c(Wire);
@@ -17,15 +19,16 @@ WiFiManager wm;
 String deviceName = "Device 1";
 String setupCode = "";
 String token = "";
-String baseUrl = "";
+String studentUrl = "";
+String teacherUrl = "";
 String macAddress = "";
 String chipId = "";
 String localIp = "";
 
-String setupUrl = "http://192.168.31.117:5000/api/devices/setup";
+String setupUrl = "http://app.educanium.com/api/devices/setup";
 
 // ===== HEARTBEAT =====
-String heartbeatUrl = "http://192.168.31.117:5000/api/devices/heartbeat";
+String heartbeatUrl = "http://app.educanium.com/api/devices/heartbeat";
 unsigned long lastHeartbeat = 0;
 const unsigned long HEARTBEAT_INTERVAL = 7000;
 
@@ -165,8 +168,9 @@ void sendHeartbeat() {
 
   if (WiFi.status() != WL_CONNECTED) return;
 
-  WiFiClient client;
-  HTTPClient http;
+  WiFiClientSecure client;
+client.setInsecure();         // <--- this line makes https work
+HTTPClient http;
 
   if (!http.begin(client, heartbeatUrl)) return;
 
@@ -191,10 +195,14 @@ void sendHeartbeat() {
     if (deserializeJson(resp, res) == DeserializationError::Ok && resp["success"]) {
 
       token = resp["token"].as<String>();
-      baseUrl = resp["url"].as<String>();
+     studentUrl = resp["studentURL"].as<String>();
+teacherUrl = resp["teacherURL"].as<String>();
+
+saveToFile("/student_url.txt", studentUrl);
+saveToFile("/teacher_url.txt", teacherUrl);
 
       saveToFile("/token.txt", token);
-      saveToFile("/url.txt", baseUrl);
+
 
       Serial.println("🔄 token & url updated from heartbeat");
 bool factoryReset = resp["factoryReset"] | false;
@@ -229,8 +237,9 @@ if (factoryReset) {
 
 // ========== SETUP API ==========
 bool setupDevice(String setupCode) {
-  WiFiClient client;
-  HTTPClient http;
+WiFiClientSecure client;
+client.setInsecure();         // <--- this line makes https work
+HTTPClient http;
 
   if (!http.begin(client, setupUrl)) {
     Serial.println("❌ Failed to connect to setup URL");
@@ -257,14 +266,20 @@ bool setupDevice(String setupCode) {
     StaticJsonDocument<512> res;
     if (deserializeJson(res, response) == DeserializationError::Ok && res["success"]) {
       token = res["token"].as<String>();
-      baseUrl = res["url"].as<String>();
+      studentUrl = res["studentURL"].as<String>();
+teacherUrl = res["teacherURL"].as<String>();
+
+saveToFile("/student_url.txt", studentUrl);
+saveToFile("/teacher_url.txt", teacherUrl);
 
       saveToFile("/token.txt", token);
-      saveToFile("/url.txt", baseUrl);
+
 
       Serial.println("🎉 Device activated successfully!");
       Serial.println("Token: " + token);
-      Serial.println("URL: " + baseUrl);
+      Serial.println("Student URL: " + studentUrl);
+Serial.println("Teacher URL: " + teacherUrl);
+
 
       http.end();
       return true;
@@ -288,22 +303,66 @@ void sendTextToServer(String text) {
   // wait until wifi connects
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("⚠️ Waiting for WiFi...");
-    blinkWifiWait(); // blink blue until it connects
+    blinkWifiWait();
   }
 
-  if (token == "" || baseUrl == "") {
-    Serial.println("❌ Missing token or URL");
+  // 🔍 Validate raw NFC text
+  text.trim();
+  if (text.length() < 2) {   // must have prefix + ID
+    Serial.println("❌ Invalid NFC data");
+    ledRed();
+    delay(2000);
+    ledOff();
+    return;
+  }
+
+  char firstChar = text.charAt(0);
+  String targetUrl = "";
+
+  // 🔀 Decide route
+  if (firstChar == 'T' || firstChar == 't') {
+    targetUrl = teacherUrl;
+    Serial.println("👨‍🏫 Teacher card detected");
+  }
+  else if (firstChar == 'S' || firstChar == 's') {
+    targetUrl = studentUrl;
+    Serial.println("🎓 Student card detected");
+  }
+  else {
+    Serial.println("❌ Invalid card prefix (use S or T)");
+    ledRed();
+    delay(2000);
+    ledOff();
+    return;
+  }
+
+  // ✂️ Remove prefix and clean ID
+  text.remove(0, 1);
+  text.trim();
+
+  if (text.length() == 0) {
+    Serial.println("❌ Empty ID after prefix removal");
+    ledRed();
+    delay(2000);
+    ledOff();
+    return;
+  }
+
+  if (token == "" || targetUrl == "") {
+    Serial.println("❌ Missing token or target URL");
     ledRed();
     delay(3000);
     ledOff();
     return;
   }
 
-  WiFiClient client;
+  // ===== HTTPS CLIENT =====
+  WiFiClientSecure client;
+  client.setInsecure();
   HTTPClient http;
 
-  if (!http.begin(client, baseUrl)) {
-    Serial.println("❌ Invalid URL");
+  if (!http.begin(client, targetUrl)) {
+    Serial.println("❌ Invalid target URL");
     ledRed();
     delay(3000);
     ledOff();
@@ -323,23 +382,14 @@ void sendTextToServer(String text) {
 
   int code = http.POST(body);
 
-  String respStr = "";
   if (code > 0) {
-    respStr = http.getString();
+    String respStr = http.getString();
     Serial.println("HTTP POST code: " + String(code));
     Serial.println("Response: " + respStr);
 
-    if (code == 200) {
-      // SUCCESS
-      ledGreen();
-      delay(3000);
-      ledOff();
-    } else {
-      // FAIL (any non-200)
-      ledRed();
-      delay(3000);
-      ledOff();
-    }
+    (code >= 200 && code < 300) ? ledGreen() : ledRed();
+    delay(2000);
+    ledOff();
   } else {
     Serial.println("❌ POST error: " + String(http.errorToString(code)));
     ledRed();
@@ -350,6 +400,8 @@ void sendTextToServer(String text) {
   http.end();
   cardWasPresent = false;
 }
+
+
 
 // ========== NDEF TEXT DECODER ==========
 String decodeNdefTextRecord(byte* payload, int payloadLength) {
@@ -433,18 +485,32 @@ void setup() {
 
   Serial.begin(115200);
   delay(1000);
+
+  // ===== FILE SYSTEM =====
   SPIFFS.begin();
 
+  // 🔁 Load saved URLs & token (important after reboot)
+  token = readFromFile("/token.txt");
+  studentUrl = readFromFile("/student_url.txt");
+  teacherUrl = readFromFile("/teacher_url.txt");
+
+  Serial.println("📂 Loaded from SPIFFS:");
+  Serial.println("Token: " + token);
+  Serial.println("Student URL: " + studentUrl);
+  Serial.println("Teacher URL: " + teacherUrl);
+
+  // ===== I2C & NFC =====
   Wire.begin(4, 5); // SDA=D2, SCL=D1
   Wire.setClock(100000);
 
   nfc.begin();
   Serial.println("✅ NFC initialized");
 
+  // ===== DEVICE INFO =====
   chipId = String(ESP.getChipId());
   macAddress = WiFi.macAddress();
 
-  // initialize LED and buzzer pins
+  // ===== HARDWARE =====
   pinMode(LED_R, OUTPUT);
   pinMode(LED_G, OUTPUT);
   pinMode(LED_B, OUTPUT);
@@ -453,9 +519,11 @@ void setup() {
   ledOff();
   digitalWrite(BUZZER, LOW);
 
+  // ===== WIFI + SETUP CODE =====
   setupWiFiAndPortal();
 
-  Serial.println("🔄 Refreshing token/url using saved setup code...");
+  // ===== DEVICE SETUP / REFRESH =====
+  Serial.println("🔄 Refreshing token & URLs using setup code...");
   if (setupDevice(setupCode)) {
     Serial.println("🎉 Setup complete. Ready for NFC scanning!");
   } else {
@@ -466,6 +534,7 @@ void setup() {
 
   Serial.println("✅ System Ready for NFC Scanning...");
 }
+
 
 // ========== LOOP ==========
 void loop() {
