@@ -25,10 +25,10 @@ String macAddress = "";
 String chipId = "";
 String localIp = "";
 
-String setupUrl = "http://app.educanium.com/api/devices/setup";
+String setupUrl = "https://app.educanium.com/api/devices/setup";
 
 // ===== HEARTBEAT =====
-String heartbeatUrl = "http://app.educanium.com/api/devices/heartbeat";
+String heartbeatUrl = "https://app.educanium.com/api/devices/heartbeat";
 unsigned long lastHeartbeat = 0;
 const unsigned long HEARTBEAT_INTERVAL = 7000;
 

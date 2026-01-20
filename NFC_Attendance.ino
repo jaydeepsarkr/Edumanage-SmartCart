@@ -7,7 +7,13 @@
 #include <WiFiManager.h>
 #include <FS.h>
 #include <ArduinoJson.h>
-#include <WiFiClientSecure.h>
+
+
+bool setupDevice(String setupCode);
+
+// ========== RETRY FILES ==========
+#define WIFI_RETRY_FILE  "/wifi_retry.txt"
+#define SETUP_RETRY_FILE "/setup_retry.txt"
 
 
 // ========== NFC SETUP ==========
@@ -25,10 +31,11 @@ String macAddress = "";
 String chipId = "";
 String localIp = "";
 
-String setupUrl = "http://app.educanium.com/api/devices/setup";
+// 🔽 HTTPS → HTTP
+String setupUrl = "http://192.168.0.132:5000/api/devices/setup";
 
 // ===== HEARTBEAT =====
-String heartbeatUrl = "http://app.educanium.com/api/devices/heartbeat";
+String heartbeatUrl = "http://192.168.0.132:5000/api/devices/heartbeat";
 unsigned long lastHeartbeat = 0;
 const unsigned long HEARTBEAT_INTERVAL = 7000;
 
@@ -80,11 +87,56 @@ void ledBlue() {
   digitalWrite(LED_B, LOW);
 }
 void ledIdle() {
-  // more soft gray (~20%)
-  analogWrite(LED_R, 800);
-  analogWrite(LED_G, 800);
-  analogWrite(LED_B, 800);
+  ledOff();
 }
+
+
+void blinkBlueTimes(int times) {
+  for (int i = 0; i < times; i++) {
+    ledBlue();
+    delay(250);
+    ledOff();
+    delay(250);
+  }
+}
+
+void blinkRedTimes(int times) {
+  for (int i = 0; i < times; i++) {
+    ledRed();
+    delay(300);
+    ledOff();
+    delay(300);
+  }
+}
+
+void showSetupSuccess() {
+  ledGreen();
+  delay(2000);
+  ledOff();
+}
+
+void showDuplicate() {
+  ledOrange();   // yellow
+  delay(800);
+  ledOff();
+}
+
+void showWaiting() {
+  ledOrange();   // yellow
+}
+
+void showSuccess() {
+  ledGreen();
+  delay(1500);
+  ledOff();
+}
+
+void showFail() {
+  ledRed();
+  delay(1500);
+  ledOff();
+}
+
 
 
 
@@ -96,15 +148,11 @@ void buzzShort() {
 
 void blinkWifiWait() {
   while (WiFi.status() != WL_CONNECTED) {
-    ledBlue();        // ON
-    delay(300);
-    ledOff();         // OFF
-    delay(300);
+    showWaiting();  // 🟡 yellow
+    delay(400);
+    ledOff();
+    delay(400);
   }
-
-  // when finally connects → show ORANGE for 1 sec then go idle
-  ledGreen();
-  delay(1000);
 }
 
 void blinkDuringScan() {
@@ -133,10 +181,30 @@ String readFromFile(String path) {
   f.close();
   return content;
 }
+int readRetryCount(const char* path) {
+  File f = SPIFFS.open(path, "r");
+  if (!f) return 0;
+  int v = f.parseInt();
+  f.close();
+  return v;
+}
+
+void saveRetryCount(const char* path, int value) {
+  File f = SPIFFS.open(path, "w");
+  if (!f) return;
+  f.print(value);
+  f.close();
+}
+
+void resetRetryCount(const char* path) {
+  SPIFFS.remove(path);
+}
+
 
 // helper to fully factory-reset device: erase SPIFFS + wifi creds + WiFiManager data, then restart
 void performFactoryReset() {
   Serial.println("⚠️ Factory Reset initiated by server...");
+blinkRedTimes(3);   // 🔴🔴🔴
 
   // 1) Format SPIFFS (delete all stored files)
   Serial.println("🗑️ Formatting SPIFFS (deleting ROM files)...");
@@ -168,8 +236,9 @@ void sendHeartbeat() {
 
   if (WiFi.status() != WL_CONNECTED) return;
 
-  WiFiClientSecure client;
-client.setInsecure();         // <--- this line makes https work
+WiFiClient client;
+
+
 HTTPClient http;
 
   if (!http.begin(client, heartbeatUrl)) return;
@@ -237,9 +306,8 @@ if (factoryReset) {
 
 // ========== SETUP API ==========
 bool setupDevice(String setupCode) {
-WiFiClientSecure client;
-client.setInsecure();         // <--- this line makes https work
-HTTPClient http;
+  WiFiClient client;
+  HTTPClient http;
 
   if (!http.begin(client, setupUrl)) {
     Serial.println("❌ Failed to connect to setup URL");
@@ -259,40 +327,63 @@ HTTPClient http;
   serializeJson(doc, body);
 
   int code = http.POST(body);
+
   if (code > 0) {
     String response = http.getString();
     Serial.println("✅ Setup Response: " + response);
 
     StaticJsonDocument<512> res;
     if (deserializeJson(res, response) == DeserializationError::Ok && res["success"]) {
+
       token = res["token"].as<String>();
       studentUrl = res["studentURL"].as<String>();
-teacherUrl = res["teacherURL"].as<String>();
+      teacherUrl = res["teacherURL"].as<String>();
 
-saveToFile("/student_url.txt", studentUrl);
-saveToFile("/teacher_url.txt", teacherUrl);
-
+      saveToFile("/student_url.txt", studentUrl);
+      saveToFile("/teacher_url.txt", teacherUrl);
       saveToFile("/token.txt", token);
 
+      resetRetryCount(SETUP_RETRY_FILE);
 
       Serial.println("🎉 Device activated successfully!");
       Serial.println("Token: " + token);
       Serial.println("Student URL: " + studentUrl);
-Serial.println("Teacher URL: " + teacherUrl);
+      Serial.println("Teacher URL: " + teacherUrl);
 
+      showSetupSuccess();   // 🟢 GREEN for 2 seconds (ONLY on success)
 
       http.end();
       return true;
-    } else {
-      Serial.println("❌ Setup failed: Invalid response");
     }
+
+    // ❌ Setup response received but failed
+    int setupRetries = readRetryCount(SETUP_RETRY_FILE) + 1;
+    saveRetryCount(SETUP_RETRY_FILE, setupRetries);
+
+    Serial.println("❌ Setup failed. Attempt " + String(setupRetries) + "/5");
+
+    if (setupRetries >= 5) {
+      resetRetryCount(SETUP_RETRY_FILE);
+      performFactoryReset();
+    }
+
   } else {
-    Serial.println("❌ Setup POST error: " + String(http.errorToString(code)));
+    // ❌ HTTP POST failed
+    int setupRetries = readRetryCount(SETUP_RETRY_FILE) + 1;
+    saveRetryCount(SETUP_RETRY_FILE, setupRetries);
+
+    Serial.println("❌ Setup POST error. Attempt " + String(setupRetries) + "/5");
+
+    if (setupRetries >= 5) {
+      resetRetryCount(SETUP_RETRY_FILE);
+      performFactoryReset();
+    }
   }
 
   http.end();
   return false;
 }
+
 
 // ========== SEND NFC TEXT ==========
 void sendTextToServer(String text) {
@@ -357,8 +448,9 @@ void sendTextToServer(String text) {
   }
 
   // ===== HTTPS CLIENT =====
-  WiFiClientSecure client;
-  client.setInsecure();
+  WiFiClient client;
+
+
   HTTPClient http;
 
   if (!http.begin(client, targetUrl)) {
@@ -387,15 +479,17 @@ void sendTextToServer(String text) {
     Serial.println("HTTP POST code: " + String(code));
     Serial.println("Response: " + respStr);
 
-    (code >= 200 && code < 300) ? ledGreen() : ledRed();
-    delay(2000);
-    ledOff();
-  } else {
-    Serial.println("❌ POST error: " + String(http.errorToString(code)));
-    ledRed();
-    delay(3000);
-    ledOff();
-  }
+  if (code >= 200 && code < 300) {
+  showSuccess();   // 🟢
+} else {
+  showFail();      // 🔴
+}
+
+ } else {
+  Serial.println("❌ POST error: " + String(http.errorToString(code)));
+  showFail();      // 🔴 ADD HERE
+}
+
 
   http.end();
   cardWasPresent = false;
@@ -449,10 +543,22 @@ void setupWiFiAndPortal() {
       yield();
     }
 
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("❌ WiFi connection failed. Restarting...");
-      ESP.restart();
-    }
+ if (WiFi.status() != WL_CONNECTED) {
+
+  int wifiRetries = readRetryCount(WIFI_RETRY_FILE) + 1;
+  saveRetryCount(WIFI_RETRY_FILE, wifiRetries);
+
+  Serial.println("❌ WiFi connection failed. Attempt " + String(wifiRetries) + "/5");
+
+  if (wifiRetries >= 5) {
+    resetRetryCount(WIFI_RETRY_FILE);
+    performFactoryReset();
+  }
+
+  delay(2000);
+  ESP.restart();
+}
+
 
     setupCode = setupCodeField.getValue();
 
@@ -474,8 +580,12 @@ void setupWiFiAndPortal() {
     }
   }
 
+    // ✅ ADD THIS LINE HERE (Wi-Fi SUCCESS)
+  resetRetryCount(WIFI_RETRY_FILE);
+
   Serial.println("✅ Wi-Fi Connected: " + WiFi.localIP().toString());
   localIp = WiFi.localIP().toString();
+  blinkBlueTimes(3);
 }
 
 
@@ -590,6 +700,7 @@ void loop() {
   ledOff(); // also turn LED off after sending
 } else {
   Serial.println("⏭️ Duplicate scan skipped");
+   showDuplicate();
   // after 3 seconds allow same card again
   delay(3000);
   cardWasPresent = false;
