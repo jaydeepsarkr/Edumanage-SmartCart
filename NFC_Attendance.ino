@@ -384,9 +384,8 @@ bool setupDevice(String setupCode) {
   return false;
 }
 
-
 // ========== SEND NFC TEXT ==========
-void sendTextToServer(String text) {
+bool sendTextToServer(String text) {
   // Immediately: short beep + orange LED
   buzzShort();
   ledOrange();
@@ -399,12 +398,10 @@ void sendTextToServer(String text) {
 
   // 🔍 Validate raw NFC text
   text.trim();
-  if (text.length() < 2) {   // must have prefix + ID
+  if (text.length() < 2) {
     Serial.println("❌ Invalid NFC data");
-    ledRed();
-    delay(2000);
-    ledOff();
-    return;
+    showFail();
+    return false;
   }
 
   char firstChar = text.charAt(0);
@@ -420,45 +417,34 @@ void sendTextToServer(String text) {
     Serial.println("🎓 Student card detected");
   }
   else {
-    Serial.println("❌ Invalid card prefix (use S or T)");
-    ledRed();
-    delay(2000);
-    ledOff();
-    return;
+    Serial.println("❌ Invalid card prefix");
+    showFail();
+    return false;
   }
 
-  // ✂️ Remove prefix and clean ID
+  // ✂️ Remove prefix
   text.remove(0, 1);
   text.trim();
 
   if (text.length() == 0) {
     Serial.println("❌ Empty ID after prefix removal");
-    ledRed();
-    delay(2000);
-    ledOff();
-    return;
+    showFail();
+    return false;
   }
 
   if (token == "" || targetUrl == "") {
     Serial.println("❌ Missing token or target URL");
-    ledRed();
-    delay(3000);
-    ledOff();
-    return;
+    showFail();
+    return false;
   }
 
-  // ===== HTTPS CLIENT =====
   WiFiClient client;
-
-
   HTTPClient http;
 
   if (!http.begin(client, targetUrl)) {
     Serial.println("❌ Invalid target URL");
-    ledRed();
-    delay(3000);
-    ledOff();
-    return;
+    showFail();
+    return false;
   }
 
   http.addHeader("Content-Type", "application/json");
@@ -473,26 +459,28 @@ void sendTextToServer(String text) {
   serializeJson(doc, body);
 
   int code = http.POST(body);
+  bool success = false;
 
   if (code > 0) {
     String respStr = http.getString();
     Serial.println("HTTP POST code: " + String(code));
     Serial.println("Response: " + respStr);
 
-  if (code >= 200 && code < 300) {
-  showSuccess();   // 🟢
-} else {
-  showFail();      // 🔴
-}
-
- } else {
-  Serial.println("❌ POST error: " + String(http.errorToString(code)));
-  showFail();      // 🔴 ADD HERE
-}
-
+    if (code >= 200 && code < 300) {
+      showSuccess();   // 🟢
+      success = true;
+    } else {
+      showFail();      // 🔴
+    }
+  } else {
+    Serial.println("❌ POST error: " + http.errorToString(code));
+    showFail();        // 🔴
+  }
 
   http.end();
   cardWasPresent = false;
+
+  return success;
 }
 
 
@@ -690,9 +678,15 @@ void loop() {
             Serial.println("📗 Scanned text: " + text);
 
       if (text != lastSentText && millis() - lastScanTime >= SCAN_DEBOUNCE_MS) {
-  sendTextToServer(text);
-  lastSentText = text;
+bool success = sendTextToServer(text);
+
+if (success) {
+  lastSentText = text;        // duplicate lock ONLY on success
   lastScanTime = millis();
+} else {
+  lastSentText = "";          // allow unlimited retries
+}
+
 
   // ***** NEW line added *******
   cardWasPresent = false;   // reset immediately after success/fail
