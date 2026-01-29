@@ -15,6 +15,8 @@ bool setupDevice(String setupCode);
 // ========== RETRY FILES ==========
 #define WIFI_RETRY_FILE  "/wifi_retry.txt"
 #define SETUP_RETRY_FILE "/setup_retry.txt"
+#define BOOT_COUNT_FILE "/boot_count.txt"
+#define MAX_BOOT_COUNT 5
 
 
 // ========== NFC SETUP ==========
@@ -38,7 +40,11 @@ String heartbeatUrl = "https://app.educanium.com/api/devices/heartbeat";
 
 
 unsigned long lastHeartbeat = 0;
-const unsigned long HEARTBEAT_INTERVAL = 7000;
+const unsigned long HEARTBEAT_INTERVAL = 5000;   // 5 seconds
+
+unsigned long lastCardActivity = 0;
+const unsigned long CARD_IDLE_TIMEOUT = 300000; // 5 minutes
+
 
 
 // ========== NFC CONTROL ==========
@@ -138,6 +144,14 @@ void showFail() {
   ledOff();
 }
 
+void blinkOrangeTimes(int times) {
+  for (int i = 0; i < times; i++) {
+    ledOrange();
+    delay(300);
+    ledOff();
+    delay(300);
+  }
+}
 
 
 
@@ -166,6 +180,7 @@ void blinkWhileSaving() {
   ledOff();
   delay(200);
 }
+
 
 // ========== FILE FUNCTIONS ==========
 void saveToFile(String path, String content) {
@@ -380,8 +395,10 @@ bool setupDevice(String setupCode) {
 
   http.end();   // ✅ always close before reset
 
-  if (setupRetries >= 5) {
+  if (setupRetries >= 3) {
     resetRetryCount(SETUP_RETRY_FILE);
+      blinkRedTimes(3);   // 🔴🔴 indicate setup failure before reset
+  delay(500);
     performFactoryReset(); // never returns
   }
 
@@ -427,8 +444,8 @@ bool sendTextToServer(String text) {
   }
 
   // Remove prefix
-  text.remove(0, 1);
-  text.trim();
+  // text.remove(0, 1);
+  // text.trim();
 
   if (text.length() == 0 || token == "" || targetUrl == "") {
     Serial.println("❌ Missing ID / token / URL");
@@ -462,18 +479,38 @@ bool sendTextToServer(String text) {
   int code = http.POST(body);
   bool success = false;
 
-  if (code > 0) {
-    String respStr = http.getString();
-    Serial.println("HTTP POST code: " + String(code));
-    Serial.println("Response: " + respStr);
+ if (code > 0) {
+  String respStr = http.getString();
+  Serial.println("HTTP POST code: " + String(code));
+  Serial.println("Response: " + respStr);
 
-    if (code >= 200 && code < 300) {
-      showSuccess();     // 🟢
-      success = true;
-    } else {
-      showFail();        // 🔴
+  // ===== TOKEN EXPIRED =====
+  if (code == 401) {
+
+    Serial.println("🔑 Token expired – running setup again...");
+
+    http.end();   // close current connection
+
+    if (setupDevice(setupCode)) {
+      Serial.println("✅ Token refreshed. Retrying NFC once...");
+
+      delay(300);
+      return sendTextToServer(text);   // 🔁 retry same card once
     }
+
+    Serial.println("❌ Setup failed after 401");
+    delay(2000);
+    ESP.restart();
   }
+
+  if (code >= 200 && code < 300) {
+    showSuccess();
+    success = true;
+  } else {
+    showFail();
+  }
+}
+
   else {
     Serial.println("❌ POST failed: " + http.errorToString(code));
     showFail();          // 🔴
@@ -542,8 +579,10 @@ void setupWiFiAndPortal() {
 
   Serial.println("❌ WiFi connection failed. Attempt " + String(wifiRetries) + "/5");
 
-  if (wifiRetries >= 5) {
+  if (wifiRetries >= 50) {
     resetRetryCount(WIFI_RETRY_FILE);
+     blinkRedTimes(2);   // 🔴🔴 WiFi failure indication
+  delay(500);
     performFactoryReset();
   }
 
@@ -580,6 +619,22 @@ void setupWiFiAndPortal() {
   blinkBlueTimes(3);
 }
 
+void checkRapidBoots() {
+
+  int boots = readRetryCount(BOOT_COUNT_FILE);
+  boots++;
+
+  saveRetryCount(BOOT_COUNT_FILE, boots);
+
+  Serial.println("⚡ Boot #: " + String(boots));
+
+  if (boots >= MAX_BOOT_COUNT) {
+    Serial.println("🔥 Power-cycle factory reset!");
+
+    SPIFFS.remove(BOOT_COUNT_FILE);
+    performFactoryReset();   // never returns
+  }
+}
 
 // ========== SETUP ==========
 void setup() {
@@ -590,7 +645,7 @@ void setup() {
 
   // ===== FILE SYSTEM =====
   SPIFFS.begin();
-
+checkRapidBoots();
   // 🔁 Load saved URLs & token (important after reboot)
   token = readFromFile("/token.txt");
   studentUrl = readFromFile("/student_url.txt");
@@ -635,22 +690,44 @@ void setup() {
   }
 
   Serial.println("✅ System Ready for NFC Scanning...");
+  lastCardActivity = millis();
 }
 
 
 // ========== LOOP ==========
 void loop() {
+  // ===== CLEAR RAPID BOOT COUNTER AFTER 10s STABLE =====
+  static unsigned long stableStart = millis();
 
+  if (millis() - stableStart > 10000) {
+    SPIFFS.remove(BOOT_COUNT_FILE);   // survived 10 sec → normal boot
+  }
    // idle color if no tag present
   if (! cardWasPresent) {
     ledIdle();
   }
 
   // ===== HEARTBEAT TIMER =====
+ // ===== SMART HEARTBEAT CONTROL =====
+
+// Check if cards have been idle for 5 minutes
+bool cardIdle =
+  (millis() - lastCardActivity) > CARD_IDLE_TIMEOUT;
+
+// Only heartbeat when cards are idle
+if (cardIdle) {
+
   if (millis() - lastHeartbeat >= HEARTBEAT_INTERVAL) {
+    Serial.println("💓 Heartbeat (idle mode)");
     sendHeartbeat();
     lastHeartbeat = millis();
   }
+
+} else {
+  // cards active → disable heartbeat timer
+  lastHeartbeat = millis();
+}
+
 
   // NO LED HERE – idle = no light
 
@@ -685,9 +762,11 @@ void loop() {
  bool success = sendTextToServer(text);
 
 if (success) {
-  lastSentText = text;      // duplicate protection ONLY on success
+  lastSentText = text;
   lastScanTime = millis();
-} else {
+  lastCardActivity = millis();   // ✅ mark card activity
+}
+ else {
   lastSentText = "";        // allow retry immediately
 }
 
@@ -698,7 +777,8 @@ if (success) {
   ledOff(); // also turn LED off after sending
 } else {
   Serial.println("⏭️ Duplicate scan skipped");
-   showDuplicate();
+ blinkOrangeTimes(2);   // 🔶🔶 duplicate indication
+
   // after 3 seconds allow same card again
   delay(3000);
   cardWasPresent = false;

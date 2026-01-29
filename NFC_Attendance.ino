@@ -423,8 +423,8 @@ bool sendTextToServer(String text) {
   }
 
   // ✂️ Remove prefix
-  text.remove(0, 1);
-  text.trim();
+  // text.remove(0, 1);
+  // text.trim();
 
   if (text.length() == 0) {
     Serial.println("❌ Empty ID after prefix removal");
