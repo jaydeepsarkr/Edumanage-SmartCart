@@ -9,11 +9,14 @@
 #include <ArduinoJson.h>
 
 
+
 bool setupDevice(String setupCode);
 
 // ========== RETRY FILES ==========
 #define WIFI_RETRY_FILE  "/wifi_retry.txt"
 #define SETUP_RETRY_FILE "/setup_retry.txt"
+#define BOOT_COUNT_FILE "/boot_count.txt"
+#define MAX_BOOT_COUNT 5
 
 
 // ========== NFC SETUP ==========
@@ -22,7 +25,7 @@ NfcAdapter nfc(pn532_i2c);
 WiFiManager wm;
 
 // ========== CONFIG ==========
-String deviceName = "Device 1";
+
 String setupCode = "";
 String token = "";
 String studentUrl = "";
@@ -31,13 +34,17 @@ String macAddress = "";
 String chipId = "";
 String localIp = "";
 
-// 🔽 HTTPS → HTTP
 String setupUrl = "http://192.168.0.132:5000/api/devices/setup";
-
 // ===== HEARTBEAT =====
 String heartbeatUrl = "http://192.168.0.132:5000/api/devices/heartbeat";
+
+
 unsigned long lastHeartbeat = 0;
-const unsigned long HEARTBEAT_INTERVAL = 7000;
+const unsigned long HEARTBEAT_INTERVAL = 5000;   // 5 seconds
+
+unsigned long lastCardActivity = 0;
+const unsigned long CARD_IDLE_TIMEOUT = 300000; // 5 minutes
+
 
 
 // ========== NFC CONTROL ==========
@@ -137,6 +144,14 @@ void showFail() {
   ledOff();
 }
 
+void blinkOrangeTimes(int times) {
+  for (int i = 0; i < times; i++) {
+    ledOrange();
+    delay(300);
+    ledOff();
+    delay(300);
+  }
+}
 
 
 
@@ -165,6 +180,7 @@ void blinkWhileSaving() {
   ledOff();
   delay(200);
 }
+
 
 // ========== FILE FUNCTIONS ==========
 void saveToFile(String path, String content) {
@@ -230,18 +246,18 @@ blinkRedTimes(3);   // 🔴🔴🔴
   delay(1500);
   ESP.restart();
 }
-
 // ===== HEARTBEAT FN =====
 void sendHeartbeat() {
 
   if (WiFi.status() != WL_CONNECTED) return;
 
 WiFiClient client;
-
-
 HTTPClient http;
 
-  if (!http.begin(client, heartbeatUrl)) return;
+if (!http.begin(client, heartbeatUrl)) {
+    Serial.println("❌ Heartbeat begin() failed");
+    return;
+  }
 
   http.addHeader("Content-Type", "application/json");
 
@@ -264,60 +280,63 @@ HTTPClient http;
     if (deserializeJson(resp, res) == DeserializationError::Ok && resp["success"]) {
 
       token = resp["token"].as<String>();
-     studentUrl = resp["studentURL"].as<String>();
-teacherUrl = resp["teacherURL"].as<String>();
+      studentUrl = resp["studentURL"].as<String>();
+      teacherUrl = resp["teacherURL"].as<String>();
 
-saveToFile("/student_url.txt", studentUrl);
-saveToFile("/teacher_url.txt", teacherUrl);
-
+      saveToFile("/student_url.txt", studentUrl);
+      saveToFile("/teacher_url.txt", teacherUrl);
       saveToFile("/token.txt", token);
 
-
       Serial.println("🔄 token & url updated from heartbeat");
-bool factoryReset = resp["factoryReset"] | false;
-if (factoryReset) {
-  performFactoryReset(); // will not return (calls ESP.restart)
-}
 
-
+      bool factoryReset = resp["factoryReset"] | false;
+      if (factoryReset) {
+        http.end();
+        performFactoryReset(); // never returns
+      }
 
     } else {
+      Serial.println("❌ Heartbeat rejected. Retrying setup...");
+      http.end();
 
-      Serial.println("❌ Heartbeat failed. Trying setup again...");
       if (!setupDevice(setupCode)) {
-        Serial.println("❌ Setup failed after heartbeat fail. Restarting...");
         delay(3000);
         ESP.restart();
       }
+      return;
     }
 
   } else {
+    Serial.println("❌ Heartbeat POST failed: " + http.errorToString(code));
+    http.end();
 
-    Serial.println("❌ Heartbeat HTTP error. Trying setup again...");
     if (!setupDevice(setupCode)) {
-      Serial.println("❌ Setup failed after HTTP error. Restarting...");
       delay(3000);
       ESP.restart();
     }
-
+    return;
   }
-}
 
+  http.end();  // ✅ IMPORTANT
+}
 
 // ========== SETUP API ==========
 bool setupDevice(String setupCode) {
-  WiFiClient client;
-  HTTPClient http;
 
-  if (!http.begin(client, setupUrl)) {
-    Serial.println("❌ Failed to connect to setup URL");
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+WiFiClient client;
+HTTPClient http;
+
+if (!http.begin(client, setupUrl)) {
+    Serial.println("❌ Setup HTTPS begin() failed");
     return false;
   }
 
   http.addHeader("Content-Type", "application/json");
 
   StaticJsonDocument<400> doc;
-  doc["deviceName"] = deviceName;
+
   doc["code"] = setupCode;
   doc["macAddress"] = macAddress;
   doc["chipId"] = chipId;
@@ -350,53 +369,52 @@ bool setupDevice(String setupCode) {
       Serial.println("Student URL: " + studentUrl);
       Serial.println("Teacher URL: " + teacherUrl);
 
-      showSetupSuccess();   // 🟢 GREEN for 2 seconds (ONLY on success)
+      showSetupSuccess();   // 🟢 success only
 
       http.end();
       return true;
     }
 
-    // ❌ Setup response received but failed
-    int setupRetries = readRetryCount(SETUP_RETRY_FILE) + 1;
-    saveRetryCount(SETUP_RETRY_FILE, setupRetries);
-
-    Serial.println("❌ Setup failed. Attempt " + String(setupRetries) + "/5");
-
-    if (setupRetries >= 5) {
-      resetRetryCount(SETUP_RETRY_FILE);
-      performFactoryReset();
-    }
-
-  } else {
-    // ❌ HTTP POST failed
-    int setupRetries = readRetryCount(SETUP_RETRY_FILE) + 1;
-    saveRetryCount(SETUP_RETRY_FILE, setupRetries);
-
-    Serial.println("❌ Setup POST error. Attempt " + String(setupRetries) + "/5");
-
-    if (setupRetries >= 5) {
-      resetRetryCount(SETUP_RETRY_FILE);
-      performFactoryReset();
-    }
+    // ❌ Setup rejected by server
+    Serial.println("❌ Setup rejected by server");
+  }
+  else {
+    // ❌ HTTPS POST failed
+    Serial.println("❌ Setup POST failed: " + http.errorToString(code));
   }
 
-  http.end();
+  // ===== retry handling =====
+  int setupRetries = readRetryCount(SETUP_RETRY_FILE) + 1;
+  saveRetryCount(SETUP_RETRY_FILE, setupRetries);
+
+  Serial.println("❌ Setup attempt " + String(setupRetries) + "/5 failed");
+
+  http.end();   // ✅ always close before reset
+
+  if (setupRetries >= 3) {
+    resetRetryCount(SETUP_RETRY_FILE);
+      blinkRedTimes(3);   // 🔴🔴 indicate setup failure before reset
+  delay(500);
+    performFactoryReset(); // never returns
+  }
+
   return false;
 }
 
+
 // ========== SEND NFC TEXT ==========
 bool sendTextToServer(String text) {
-  // Immediately: short beep + orange LED
+
   buzzShort();
   ledOrange();
 
-  // wait until wifi connects
+  // Wait for WiFi
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("⚠️ Waiting for WiFi...");
     blinkWifiWait();
   }
 
-  // 🔍 Validate raw NFC text
+  // Validate NFC text
   text.trim();
   if (text.length() < 2) {
     Serial.println("❌ Invalid NFC data");
@@ -407,7 +425,6 @@ bool sendTextToServer(String text) {
   char firstChar = text.charAt(0);
   String targetUrl = "";
 
-  // 🔀 Decide route
   if (firstChar == 'T' || firstChar == 't') {
     targetUrl = teacherUrl;
     Serial.println("👨‍🏫 Teacher card detected");
@@ -422,27 +439,22 @@ bool sendTextToServer(String text) {
     return false;
   }
 
-  // ✂️ Remove prefix
+  // Remove prefix
   // text.remove(0, 1);
   // text.trim();
 
-  if (text.length() == 0) {
-    Serial.println("❌ Empty ID after prefix removal");
+  if (text.length() == 0 || token == "" || targetUrl == "") {
+    Serial.println("❌ Missing ID / token / URL");
     showFail();
     return false;
   }
 
-  if (token == "" || targetUrl == "") {
-    Serial.println("❌ Missing token or target URL");
-    showFail();
-    return false;
-  }
+  // ===== HTTPS CLIENT =====
+WiFiClient client;
+HTTPClient http;
 
-  WiFiClient client;
-  HTTPClient http;
-
-  if (!http.begin(client, targetUrl)) {
-    Serial.println("❌ Invalid target URL");
+if (!http.begin(client, targetUrl)) {
+    Serial.println("❌ HTTPS begin() failed");
     showFail();
     return false;
   }
@@ -461,27 +473,50 @@ bool sendTextToServer(String text) {
   int code = http.POST(body);
   bool success = false;
 
-  if (code > 0) {
-    String respStr = http.getString();
-    Serial.println("HTTP POST code: " + String(code));
-    Serial.println("Response: " + respStr);
+ if (code > 0) {
+  String respStr = http.getString();
+  Serial.println("HTTP POST code: " + String(code));
+  Serial.println("Response: " + respStr);
 
-    if (code >= 200 && code < 300) {
-      showSuccess();   // 🟢
-      success = true;
-    } else {
-      showFail();      // 🔴
+  // ===== TOKEN EXPIRED =====
+  if (code == 401) {
+
+    Serial.println("🔑 Token expired – running setup again...");
+
+    http.end();   // close current connection
+
+    if (setupDevice(setupCode)) {
+      Serial.println("✅ Token refreshed. Retrying NFC once...");
+
+      delay(300);
+      return sendTextToServer(text);   // 🔁 retry same card once
     }
-  } else {
-    Serial.println("❌ POST error: " + http.errorToString(code));
-    showFail();        // 🔴
+
+    Serial.println("❌ Setup failed after 401");
+    delay(2000);
+    ESP.restart();
   }
 
-  http.end();
+  if (code >= 200 && code < 300) {
+    showSuccess();
+    success = true;
+  } else {
+    showFail();
+  }
+}
+
+  else {
+    Serial.println("❌ POST failed: " + http.errorToString(code));
+    showFail();          // 🔴
+  }
+
+  http.end();            // always close HTTPS
   cardWasPresent = false;
 
-  return success;
+  return success;        // ✅ tells loop() if duplicate lock should apply
 }
+
+
 
 
 
@@ -538,8 +573,10 @@ void setupWiFiAndPortal() {
 
   Serial.println("❌ WiFi connection failed. Attempt " + String(wifiRetries) + "/5");
 
-  if (wifiRetries >= 5) {
+  if (wifiRetries >= 50) {
     resetRetryCount(WIFI_RETRY_FILE);
+     blinkRedTimes(2);   // 🔴🔴 WiFi failure indication
+  delay(500);
     performFactoryReset();
   }
 
@@ -576,6 +613,22 @@ void setupWiFiAndPortal() {
   blinkBlueTimes(3);
 }
 
+void checkRapidBoots() {
+
+  int boots = readRetryCount(BOOT_COUNT_FILE);
+  boots++;
+
+  saveRetryCount(BOOT_COUNT_FILE, boots);
+
+  Serial.println("⚡ Boot #: " + String(boots));
+
+  if (boots >= MAX_BOOT_COUNT) {
+    Serial.println("🔥 Power-cycle factory reset!");
+
+    SPIFFS.remove(BOOT_COUNT_FILE);
+    performFactoryReset();   // never returns
+  }
+}
 
 // ========== SETUP ==========
 void setup() {
@@ -586,7 +639,7 @@ void setup() {
 
   // ===== FILE SYSTEM =====
   SPIFFS.begin();
-
+checkRapidBoots();
   // 🔁 Load saved URLs & token (important after reboot)
   token = readFromFile("/token.txt");
   studentUrl = readFromFile("/student_url.txt");
@@ -631,22 +684,44 @@ void setup() {
   }
 
   Serial.println("✅ System Ready for NFC Scanning...");
+  lastCardActivity = millis();
 }
 
 
 // ========== LOOP ==========
 void loop() {
+  // ===== CLEAR RAPID BOOT COUNTER AFTER 10s STABLE =====
+  static unsigned long stableStart = millis();
 
+  if (millis() - stableStart > 10000) {
+    SPIFFS.remove(BOOT_COUNT_FILE);   // survived 10 sec → normal boot
+  }
    // idle color if no tag present
   if (! cardWasPresent) {
     ledIdle();
   }
 
   // ===== HEARTBEAT TIMER =====
+ // ===== SMART HEARTBEAT CONTROL =====
+
+// Check if cards have been idle for 5 minutes
+bool cardIdle =
+  (millis() - lastCardActivity) > CARD_IDLE_TIMEOUT;
+
+// Only heartbeat when cards are idle
+if (cardIdle) {
+
   if (millis() - lastHeartbeat >= HEARTBEAT_INTERVAL) {
+    Serial.println("💓 Heartbeat (idle mode)");
     sendHeartbeat();
     lastHeartbeat = millis();
   }
+
+} else {
+  // cards active → disable heartbeat timer
+  lastHeartbeat = millis();
+}
+
 
   // NO LED HERE – idle = no light
 
@@ -678,13 +753,15 @@ void loop() {
             Serial.println("📗 Scanned text: " + text);
 
       if (text != lastSentText && millis() - lastScanTime >= SCAN_DEBOUNCE_MS) {
-bool success = sendTextToServer(text);
+ bool success = sendTextToServer(text);
 
 if (success) {
-  lastSentText = text;        // duplicate lock ONLY on success
+  lastSentText = text;
   lastScanTime = millis();
-} else {
-  lastSentText = "";          // allow unlimited retries
+  lastCardActivity = millis();   // ✅ mark card activity
+}
+ else {
+  lastSentText = "";        // allow retry immediately
 }
 
 
@@ -694,7 +771,8 @@ if (success) {
   ledOff(); // also turn LED off after sending
 } else {
   Serial.println("⏭️ Duplicate scan skipped");
-   showDuplicate();
+ blinkOrangeTimes(2);   // 🔶🔶 duplicate indication
+
   // after 3 seconds allow same card again
   delay(3000);
   cardWasPresent = false;

@@ -25,7 +25,7 @@ NfcAdapter nfc(pn532_i2c);
 WiFiManager wm;
 
 // ========== CONFIG ==========
-String deviceName = "Device 1";
+
 String setupCode = "";
 String token = "";
 String studentUrl = "";
@@ -340,7 +340,7 @@ bool setupDevice(String setupCode) {
   http.addHeader("Content-Type", "application/json");
 
   StaticJsonDocument<400> doc;
-  doc["deviceName"] = deviceName;
+
   doc["code"] = setupCode;
   doc["macAddress"] = macAddress;
   doc["chipId"] = chipId;
