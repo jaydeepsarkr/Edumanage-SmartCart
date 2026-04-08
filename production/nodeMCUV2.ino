@@ -7,7 +7,7 @@
 #include <WiFiManager.h>
 #include <FS.h>
 #include <ArduinoJson.h>
-
+#include <WiFiClientSecure.h>
 
 
 bool setupDevice(String setupCode);
@@ -34,16 +34,16 @@ String macAddress = "";
 String chipId = "";
 String localIp = "";
 
-String setupUrl = "http://192.168.0.132:5000/api/devices/setup";
+String setupUrl = "https://app.educanium.com/api/devices/setup";
 // ===== HEARTBEAT =====
-String heartbeatUrl = "http://192.168.0.132:5000/api/devices/heartbeat";
+String heartbeatUrl = "https://app.educanium.com/api/devices/heartbeat";
 
 
 unsigned long lastHeartbeat = 0;
 const unsigned long HEARTBEAT_INTERVAL = 5000;   // 5 seconds
 
 unsigned long lastCardActivity = 0;
-const unsigned long CARD_IDLE_TIMEOUT = 300000; // 5 minutes
+const unsigned long CARD_IDLE_TIMEOUT = 60000; // 1 minute
 
 
 
@@ -54,10 +54,10 @@ const unsigned long SCAN_DEBOUNCE_MS = 500; // prevent duplicate scans within 50
 bool cardWasPresent = false; // track card state for faster detection
 
 // ========== HARDWARE PINS ==========
-#define LED_R D5   // GPIO14
+#define LED_R D0   // GPIO16
 #define LED_G D6   // GPIO12
 #define LED_B D7   // GPIO13
-#define BUZZER  D8 // GPIO15
+#define BUZZER D8  // GPIO15
 
 
 // beep length chosen: 100ms (you selected option A)
@@ -251,10 +251,12 @@ void sendHeartbeat() {
 
   if (WiFi.status() != WL_CONNECTED) return;
 
-WiFiClient client;
-HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();   // ESP8266: skip TLS cert validation
 
-if (!http.begin(client, heartbeatUrl)) {
+  HTTPClient http;
+
+  if (!http.begin(client, heartbeatUrl)) {
     Serial.println("❌ Heartbeat begin() failed");
     return;
   }
@@ -325,10 +327,12 @@ bool setupDevice(String setupCode) {
 
   if (WiFi.status() != WL_CONNECTED) return false;
 
-WiFiClient client;
-HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();   // ESP8266: disable cert validation
 
-if (!http.begin(client, setupUrl)) {
+  HTTPClient http;
+
+  if (!http.begin(client, setupUrl)) {
     Serial.println("❌ Setup HTTPS begin() failed");
     return false;
   }
@@ -450,10 +454,12 @@ bool sendTextToServer(String text) {
   }
 
   // ===== HTTPS CLIENT =====
-WiFiClient client;
-HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();   // ESP8266 TLS
 
-if (!http.begin(client, targetUrl)) {
+  HTTPClient http;
+
+  if (!http.begin(client, targetUrl)) {
     Serial.println("❌ HTTPS begin() failed");
     showFail();
     return false;
@@ -553,7 +559,7 @@ void setupWiFiAndPortal() {
     wm.addParameter(&setupCodeField);
 
     wm.setConfigPortalBlocking(false);
-    wm.autoConnect("Device-Setup");
+    wm.autoConnect("Educanium Device Setup");
 
     unsigned long portalStart = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - portalStart < 120000) {
@@ -599,7 +605,7 @@ void setupWiFiAndPortal() {
     Serial.println("✅ Loaded setup code: " + setupCode);
 
     wm.setConfigPortalBlocking(true);  // normal mode now
-    if (!wm.autoConnect("Device-Setup")) {
+    if (!wm.autoConnect("Educanium Device Setup")) {
       Serial.println("❌ Failed to connect. Restarting...");
       ESP.restart();
     }
@@ -651,7 +657,7 @@ checkRapidBoots();
   Serial.println("Teacher URL: " + teacherUrl);
 
   // ===== I2C & NFC =====
-  Wire.begin(4, 5); // SDA=D2, SCL=D1
+ Wire.begin(2, 14); // SDA=D4, SCL=D5
   Wire.setClock(100000);
 
   nfc.begin();

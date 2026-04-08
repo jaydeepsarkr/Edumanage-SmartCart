@@ -43,7 +43,7 @@ unsigned long lastHeartbeat = 0;
 const unsigned long HEARTBEAT_INTERVAL = 5000;   // 5 seconds
 
 unsigned long lastCardActivity = 0;
-const unsigned long CARD_IDLE_TIMEOUT = 300000; // 5 minutes
+const unsigned long CARD_IDLE_TIMEOUT = 60000; // 1 minute
 
 
 
@@ -559,7 +559,7 @@ void setupWiFiAndPortal() {
     wm.addParameter(&setupCodeField);
 
     wm.setConfigPortalBlocking(false);
-    wm.autoConnect("Device-Setup");
+    wm.autoConnect("Educanium Device Setup");
 
     unsigned long portalStart = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - portalStart < 120000) {
@@ -605,7 +605,7 @@ void setupWiFiAndPortal() {
     Serial.println("✅ Loaded setup code: " + setupCode);
 
     wm.setConfigPortalBlocking(true);  // normal mode now
-    if (!wm.autoConnect("Device-Setup")) {
+    if (!wm.autoConnect("Educanium Device Setup")) {
       Serial.println("❌ Failed to connect. Restarting...");
       ESP.restart();
     }
