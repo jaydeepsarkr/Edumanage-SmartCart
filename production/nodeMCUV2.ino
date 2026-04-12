@@ -17,6 +17,7 @@ bool setupDevice(String setupCode);
 #define SETUP_RETRY_FILE "/setup_retry.txt"
 #define BOOT_COUNT_FILE "/boot_count.txt"
 #define MAX_BOOT_COUNT 5
+#define MAX_WIFI_RETRIES 3  // 👈 you can set 3 or 5
 
 
 // ========== NFC SETUP ==========
@@ -52,12 +53,14 @@ String lastSentText = "None";
 unsigned long lastScanTime = 0;
 const unsigned long SCAN_DEBOUNCE_MS = 500; // prevent duplicate scans within 500ms
 bool cardWasPresent = false; // track card state for faster detection
+unsigned long scanStartTime = 0;
 
 // ========== HARDWARE PINS ==========
-#define LED_R D0   // GPIO16
-#define LED_G D6   // GPIO12
-#define LED_B D7   // GPIO13
-#define BUZZER D8  // GPIO15
+#define LED_R D1   // GPIO5 ✅
+#define LED_G D2   // GPIO4 ✅
+#define LED_B D6   // GPIO12 ✅
+
+#define BUZZER D7  // GPIO13 ✅
 
 
 // beep length chosen: 100ms (you selected option A)
@@ -65,34 +68,63 @@ const unsigned int BUZZ_BEEP_MS = 100;
 
 // ========== LED / BUZZER HELPERS ==========
 void ledOff() {
-  digitalWrite(LED_R, HIGH);
-  digitalWrite(LED_G, HIGH);
-  digitalWrite(LED_B, HIGH);
-}
-
-void ledOrange() {
   digitalWrite(LED_R, LOW);
   digitalWrite(LED_G, LOW);
-  digitalWrite(LED_B, HIGH);
+  digitalWrite(LED_B, LOW);
 }
 
-void ledGreen() {
-  digitalWrite(LED_R, HIGH);
+void ledBlue() {
+  digitalWrite(LED_R, LOW);
   digitalWrite(LED_G, LOW);
   digitalWrite(LED_B, HIGH);
 }
 
 void ledRed() {
-  digitalWrite(LED_R, LOW);
-  digitalWrite(LED_G, HIGH);
-  digitalWrite(LED_B, HIGH);
+  digitalWrite(LED_R, HIGH);
+  digitalWrite(LED_G, LOW);
+  digitalWrite(LED_B, LOW);
 }
 
-void ledBlue() {
+void ledGreen() {
+  digitalWrite(LED_R, LOW);
+  digitalWrite(LED_G, HIGH);
+  digitalWrite(LED_B, LOW);
+}
+
+void ledOrange() {
   digitalWrite(LED_R, HIGH);
   digitalWrite(LED_G, HIGH);
   digitalWrite(LED_B, LOW);
 }
+// void ledOff() {
+//   digitalWrite(LED_R, HIGH);
+//   digitalWrite(LED_G, HIGH);
+//   digitalWrite(LED_B, HIGH);
+// }
+
+// void ledOrange() {
+//   digitalWrite(LED_R, LOW);
+//   digitalWrite(LED_G, LOW);
+//   digitalWrite(LED_B, HIGH);
+// }
+
+// void ledGreen() {
+//   digitalWrite(LED_R, HIGH);
+//   digitalWrite(LED_G, LOW);
+//   digitalWrite(LED_B, HIGH);
+// }
+
+// void ledRed() {
+//   digitalWrite(LED_R, LOW);
+//   digitalWrite(LED_G, HIGH);
+//   digitalWrite(LED_B, HIGH);
+// }
+
+// void ledBlue() {
+//   digitalWrite(LED_R, HIGH);
+//   digitalWrite(LED_G, HIGH);
+//   digitalWrite(LED_B, LOW);
+// }
 void ledIdle() {
   ledOff();
 }
@@ -118,7 +150,12 @@ void blinkRedTimes(int times) {
 
 void showSetupSuccess() {
   ledGreen();
-  delay(2000);
+
+  // 🔊 Buzzer for 1.5 seconds
+  tone(BUZZER, 2500);
+  delay(1500);
+  noTone(BUZZER);
+
   ledOff();
 }
 
@@ -134,7 +171,17 @@ void showWaiting() {
 
 void showSuccess() {
   ledGreen();
-  delay(1500);
+
+  // 🔊 Continuous double beep (no gap)
+  tone(BUZZER, 2500);
+  delay(200);   // total sound length
+  noTone(BUZZER);
+
+  // immediately start second beep
+  tone(BUZZER, 2500);
+  delay(200);
+  noTone(BUZZER);
+
   ledOff();
 }
 
@@ -572,18 +619,21 @@ void setupWiFiAndPortal() {
       yield();
     }
 
- if (WiFi.status() != WL_CONNECTED) {
+if (WiFi.status() != WL_CONNECTED) {
 
   int wifiRetries = readRetryCount(WIFI_RETRY_FILE) + 1;
   saveRetryCount(WIFI_RETRY_FILE, wifiRetries);
 
-  Serial.println("❌ WiFi connection failed. Attempt " + String(wifiRetries) + "/5");
+  Serial.println("❌ WiFi connection failed. Attempt " + String(wifiRetries) + "/" + String(MAX_WIFI_RETRIES));
 
-  if (wifiRetries >= 50) {
+  if (wifiRetries >= MAX_WIFI_RETRIES) {
+    Serial.println("🔥 WiFi failed multiple times → Factory Reset");
+
     resetRetryCount(WIFI_RETRY_FILE);
-     blinkRedTimes(2);   // 🔴🔴 WiFi failure indication
-  delay(500);
-    performFactoryReset();
+    blinkRedTimes(3);   // 🔴🔴🔴 indication
+    delay(500);
+
+    performFactoryReset();   // 💣 reset device
   }
 
   delay(2000);
@@ -605,10 +655,26 @@ void setupWiFiAndPortal() {
     Serial.println("✅ Loaded setup code: " + setupCode);
 
     wm.setConfigPortalBlocking(true);  // normal mode now
-    if (!wm.autoConnect("Educanium Device Setup")) {
-      Serial.println("❌ Failed to connect. Restarting...");
-      ESP.restart();
-    }
+if (!wm.autoConnect("Educanium Device Setup")) {
+
+  int wifiRetries = readRetryCount(WIFI_RETRY_FILE) + 1;
+  saveRetryCount(WIFI_RETRY_FILE, wifiRetries);
+
+  Serial.println("❌ WiFi reconnect failed. Attempt " + String(wifiRetries) + "/" + String(MAX_WIFI_RETRIES));
+
+  if (wifiRetries >= MAX_WIFI_RETRIES) {
+    Serial.println("🔥 WiFi failed multiple times → Factory Reset");
+
+    resetRetryCount(WIFI_RETRY_FILE);
+    blinkRedTimes(3);
+    delay(500);
+
+    performFactoryReset();
+  }
+
+  delay(2000);
+  ESP.restart();
+}
   }
 
     // ✅ ADD THIS LINE HERE (Wi-Fi SUCCESS)
@@ -696,112 +762,123 @@ checkRapidBoots();
 
 // ========== LOOP ==========
 void loop() {
+
   // ===== CLEAR RAPID BOOT COUNTER AFTER 10s STABLE =====
   static unsigned long stableStart = millis();
-
   if (millis() - stableStart > 10000) {
-    SPIFFS.remove(BOOT_COUNT_FILE);   // survived 10 sec → normal boot
+    SPIFFS.remove(BOOT_COUNT_FILE);
   }
-   // idle color if no tag present
-  if (! cardWasPresent) {
+
+  // ===== IDLE LED =====
+  if (!cardWasPresent) {
     ledIdle();
   }
 
-  // ===== HEARTBEAT TIMER =====
- // ===== SMART HEARTBEAT CONTROL =====
+  // ===== HEARTBEAT =====
+  bool cardIdle = (millis() - lastCardActivity) > CARD_IDLE_TIMEOUT;
 
-// Check if cards have been idle for 5 minutes
-bool cardIdle =
-  (millis() - lastCardActivity) > CARD_IDLE_TIMEOUT;
-
-// Only heartbeat when cards are idle
-if (cardIdle) {
-
-  if (millis() - lastHeartbeat >= HEARTBEAT_INTERVAL) {
-    Serial.println("💓 Heartbeat (idle mode)");
-    sendHeartbeat();
+  if (cardIdle) {
+    if (millis() - lastHeartbeat >= HEARTBEAT_INTERVAL) {
+      Serial.println("💓 Heartbeat (idle mode)");
+      sendHeartbeat();
+      lastHeartbeat = millis();
+    }
+  } else {
     lastHeartbeat = millis();
   }
 
-} else {
-  // cards active → disable heartbeat timer
-  lastHeartbeat = millis();
-}
-
-
-  // NO LED HERE – idle = no light
-
+  // ===== NFC =====
   bool tagNowPresent = nfc.tagPresent();
 
+  // ===== NEW SCAN DETECTED =====
   if (tagNowPresent && !cardWasPresent) {
-    // Card just appeared - read immediately without blocking loop
-    cardWasPresent = true;
 
-    ledOrange(); // ORANGE WHILE TAG IS PRESENT
+    // 🔥 Prevent false trigger (fast removal fix)
+    delay(10);
+    if (!nfc.tagPresent()) return;
+
+    cardWasPresent = true;
+    scanStartTime = millis();   // ⏱ start timeout
+
+    ledOrange();
+
     NfcTag tag = nfc.read();
 
-    if (tag.hasNdefMessage()) {
-      NdefMessage message = tag.getNdefMessage();
-      int recordCount = message.getRecordCount();
-
-      for (int i = 0; i < recordCount; i++) {
-        NdefRecord record = message.getRecord(i);
-
-        int payloadLength = record.getPayloadLength();
-        byte payload[payloadLength];
-        record.getPayload(payload);
-
-        if (payloadLength > 0) {
-          String text = decodeNdefTextRecord(payload, payloadLength);
-          text.trim();
-
-          if (text.length() > 0) {
-            Serial.println("📗 Scanned text: " + text);
-
-      if (text != lastSentText && millis() - lastScanTime >= SCAN_DEBOUNCE_MS) {
- bool success = sendTextToServer(text);
-
-if (success) {
-  lastSentText = text;
-  lastScanTime = millis();
-  lastCardActivity = millis();   // ✅ mark card activity
-}
- else {
-  lastSentText = "";        // allow retry immediately
-}
-
-
-  // ***** NEW line added *******
-  cardWasPresent = false;   // reset immediately after success/fail
-
-  ledOff(); // also turn LED off after sending
-} else {
-  Serial.println("⏭️ Duplicate scan skipped");
- blinkOrangeTimes(2);   // 🔶🔶 duplicate indication
-
-  // after 3 seconds allow same card again
-  delay(3000);
-  cardWasPresent = false;
-  ledOff();
-}
-
-          }
-        }
-      }
-    } else {
-      Serial.println("⚠️ No NDEF message found on tag");
-
-  delay(500);          // small pause
+// 🛡 extra protection (VERY IMPORTANT)
+if (!nfc.tagPresent()) {
   cardWasPresent = false;
   ledOff();
   return;
+}
+
+    // 🚨 If read fails → instant reset (NO WAIT)
+    if (!tag.hasNdefMessage()) {
+       Serial.println("⚠️ Fast remove / empty read");
+      cardWasPresent = false;
+      ledOff();
+      return;
+    }
+
+    NdefMessage message = tag.getNdefMessage();
+    int recordCount = message.getRecordCount();
+
+    for (int i = 0; i < recordCount; i++) {
+      NdefRecord record = message.getRecord(i);
+
+      int payloadLength = record.getPayloadLength();
+      byte payload[payloadLength];
+      record.getPayload(payload);
+
+      if (payloadLength > 0) {
+        String text = decodeNdefTextRecord(payload, payloadLength);
+        text.trim();
+
+        if (text.length() > 0) {
+
+          Serial.println("📗 Scanned text: " + text);
+
+          if (text != lastSentText && millis() - lastScanTime >= SCAN_DEBOUNCE_MS) {
+
+            bool success = sendTextToServer(text);
+
+            if (success) {
+              lastSentText = text;
+              lastScanTime = millis();
+              lastCardActivity = millis();
+            } else {
+              lastSentText = "";
+            }
+
+            // ✅ instant reset (NO WAIT)
+            cardWasPresent = false;
+            ledOff();
+          }
+          else {
+            Serial.println("⏭️ Duplicate scan skipped");
+
+            // ❌ removed delay(3000)
+            blinkOrangeTimes(2);
+
+            cardWasPresent = false;
+            ledOff();
+          }
+        }
+      }
     }
   }
-  else if (!tagNowPresent && cardWasPresent) {
+
+  // ===== TAG REMOVED =====
+  if (!tagNowPresent && cardWasPresent) {
     cardWasPresent = false;
-    Serial.println("Tag removed, ready for next scan.\n");
-    ledOff();   // turn off after tag removed
+    ledOff();   // ⚡ instant ready (no message, no delay)
   }
 
-  delay(30);
+  // ===== FORCE RECOVERY (MOST IMPORTANT) =====
+  if (cardWasPresent && (millis() - scanStartTime > 200)) {
+    Serial.println("⚡ Force reset scan (fast recovery)");
+    cardWasPresent = false;
+    ledOff();
+  }
+
+  yield();   // ⚡ smoother loop (no blocking)
 }
