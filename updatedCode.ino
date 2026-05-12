@@ -128,7 +128,14 @@ void ledOrange() {
 void ledIdle() {
   ledOff();
 }
-
+void indicateBootBeep(int count) {
+  for (int i = 0; i < count; i++) {
+    tone(BUZZER, 2500);   // start sound
+    delay(200);
+    noTone(BUZZER);       // stop sound
+    delay(200);
+  }
+}
 
 void blinkBlueTimes(int times) {
   for (int i = 0; i < times; i++) {
@@ -604,93 +611,85 @@ String decodeNdefTextRecord(byte* payload, int payloadLength) {
 
 void setupWiFiAndPortal() {
 
-  WiFi.mode(WIFI_STA);      // important!
+  WiFi.mode(WIFI_STA);
   setupCode = readFromFile("/setupcode.txt");
 
+  // ================================
+  // 🟡 SETUP MODE (PORTAL ONLY)
+  // ================================
   if (setupCode == "") {
     Serial.println("⚠️ No setup code found. Starting WiFi portal...");
-    Serial.println("🔵 Blue LED flashing...");
+    Serial.println("🟡 Portal mode (no retry / no reset)");
 
     WiFiManagerParameter setupCodeField("setupCode", "Enter Setup Code", "", 32);
     wm.addParameter(&setupCodeField);
 
     wm.setConfigPortalBlocking(false);
-    wm.autoConnect("Educanium Device Setup");
+    wm.startConfigPortal("Educanium Device Setup");
 
-    unsigned long portalStart = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - portalStart < 120000) {
+    // 🔁 Run portal forever until user enters data
+    while (true) {
       wm.process();
-      // small non-blocking blink
+
+      // 🔵 slow blink to indicate portal
       ledBlue();
-      delay(100);
+      delay(200);
       ledOff();
-      delay(100);
+      delay(200);
+
       yield();
+
+      // ✅ Check if user submitted setup code
+      String newCode = setupCodeField.getValue();
+      if (newCode != "") {
+        setupCode = newCode;
+
+        Serial.println("💾 Saving setup code...");
+        saveToFile("/setupcode.txt", setupCode);
+
+        Serial.println("✅ Setup code saved. Restarting...");
+        delay(1000);
+        ESP.restart();
+      }
+    }
+  }
+
+  // ================================
+  // 🟢 NORMAL MODE (AUTO CONNECT)
+  // ================================
+  Serial.println("✅ Loaded setup code: " + setupCode);
+
+  wm.setConfigPortalBlocking(true);
+
+  if (!wm.autoConnect("Educanium Device Setup")) {
+
+    int wifiRetries = readRetryCount(WIFI_RETRY_FILE) + 1;
+    saveRetryCount(WIFI_RETRY_FILE, wifiRetries);
+
+    Serial.println("❌ WiFi reconnect failed. Attempt " + String(wifiRetries) + "/" + String(MAX_WIFI_RETRIES));
+
+    if (wifiRetries >= MAX_WIFI_RETRIES) {
+      Serial.println("🔥 WiFi failed multiple times → Factory Reset");
+
+      resetRetryCount(WIFI_RETRY_FILE);
+      blinkRedTimes(3);
+      delay(500);
+
+      performFactoryReset();
     }
 
-if (WiFi.status() != WL_CONNECTED) {
-
-  int wifiRetries = readRetryCount(WIFI_RETRY_FILE) + 1;
-  saveRetryCount(WIFI_RETRY_FILE, wifiRetries);
-
-  Serial.println("❌ WiFi connection failed. Attempt " + String(wifiRetries) + "/" + String(MAX_WIFI_RETRIES));
-
-  if (wifiRetries >= MAX_WIFI_RETRIES) {
-    Serial.println("🔥 WiFi failed multiple times → Factory Reset");
-
-    resetRetryCount(WIFI_RETRY_FILE);
-    blinkRedTimes(3);   // 🔴🔴🔴 indication
-    delay(500);
-
-    performFactoryReset();   // 💣 reset device
+    delay(2000);
+    ESP.restart();
   }
 
-  delay(2000);
-  ESP.restart();
-}
-
-
-    setupCode = setupCodeField.getValue();
-
-    if (setupCode == "") {
-      Serial.println("⚠️ No setup code entered, restarting...");
-      ESP.restart();
-    }
-
-    Serial.println("💾 Saving credentials to ROM...");
-    saveToFile("/setupcode.txt", setupCode);
-    Serial.println("💾 Saved setup code: " + setupCode);
-  } else {
-    Serial.println("✅ Loaded setup code: " + setupCode);
-
-    wm.setConfigPortalBlocking(true);  // normal mode now
-if (!wm.autoConnect("Educanium Device Setup")) {
-
-  int wifiRetries = readRetryCount(WIFI_RETRY_FILE) + 1;
-  saveRetryCount(WIFI_RETRY_FILE, wifiRetries);
-
-  Serial.println("❌ WiFi reconnect failed. Attempt " + String(wifiRetries) + "/" + String(MAX_WIFI_RETRIES));
-
-  if (wifiRetries >= MAX_WIFI_RETRIES) {
-    Serial.println("🔥 WiFi failed multiple times → Factory Reset");
-
-    resetRetryCount(WIFI_RETRY_FILE);
-    blinkRedTimes(3);
-    delay(500);
-
-    performFactoryReset();
-  }
-
-  delay(2000);
-  ESP.restart();
-}
-  }
-
-    // ✅ ADD THIS LINE HERE (Wi-Fi SUCCESS)
+  // ================================
+  // ✅ WIFI SUCCESS
+  // ================================
   resetRetryCount(WIFI_RETRY_FILE);
 
   Serial.println("✅ Wi-Fi Connected: " + WiFi.localIP().toString());
   localIp = WiFi.localIP().toString();
+
   blinkBlueTimes(3);
 }
 
@@ -702,6 +701,9 @@ void checkRapidBoots() {
   saveRetryCount(BOOT_COUNT_FILE, boots);
 
   Serial.println("⚡ Boot #: " + String(boots));
+
+   // 🔊 Beep based on boot count
+  indicateBootBeep(boots);
 
   if (boots >= MAX_BOOT_COUNT) {
     Serial.println("🔥 Power-cycle factory reset!");
@@ -720,8 +722,22 @@ void setup() {
 
   // ===== FILE SYSTEM =====
   SPIFFS.begin();
-checkRapidBoots();
-  // 🔁 Load saved URLs & token (important after reboot)
+
+  // ================================
+  // 🟡 CHECK SETUP MODE FIRST
+  // ================================
+  String savedSetupCode = readFromFile("/setupcode.txt");
+
+  if (savedSetupCode == "") {
+    Serial.println("🟡 Setup mode detected → skipping boot count");
+
+    // ❌ DO NOT call checkRapidBoots()
+  } else {
+    // ✅ Normal device → count boots
+    checkRapidBoots();
+  }
+
+  // 🔁 Load saved URLs & token
   token = readFromFile("/token.txt");
   studentUrl = readFromFile("/student_url.txt");
   teacherUrl = readFromFile("/teacher_url.txt");
@@ -730,17 +746,6 @@ checkRapidBoots();
   Serial.println("Token: " + token);
   Serial.println("Student URL: " + studentUrl);
   Serial.println("Teacher URL: " + teacherUrl);
-
-  // ===== I2C & NFC =====
- Wire.begin(2, 14); // SDA=D4, SCL=D5
-  Wire.setClock(100000);
-
-  nfc.begin();
-  Serial.println("✅ NFC initialized");
-
-  // ===== DEVICE INFO =====
-  chipId = String(ESP.getChipId());
-  macAddress = WiFi.macAddress();
 
   // ===== HARDWARE =====
   pinMode(LED_R, OUTPUT);
@@ -751,10 +756,33 @@ checkRapidBoots();
   ledOff();
   digitalWrite(BUZZER, LOW);
 
-  // ===== WIFI + SETUP CODE =====
+  // ===== I2C & NFC =====
+  Wire.begin(2, 14); // SDA=D4, SCL=D5
+  Wire.setClock(100000);
+
+  nfc.begin();
+  Serial.println("✅ NFC initialized");
+
+  // ===== DEVICE INFO =====
+  chipId = String(ESP.getChipId());
+  macAddress = WiFi.macAddress();
+
+  // ================================
+  // 🌐 WIFI + PORTAL
+  // ================================
   setupWiFiAndPortal();
 
-  // ===== DEVICE SETUP / REFRESH =====
+  // ================================
+  // 🟡 IF STILL NO SETUP CODE → STOP
+  // ================================
+  if (setupCode == "") {
+    Serial.println("🟡 Still in setup mode → waiting in portal only");
+    return;   // 🚫 STOP here (no setup API call)
+  }
+
+  // ================================
+  // 🔄 DEVICE SETUP / TOKEN REFRESH
+  // ================================
   Serial.println("🔄 Refreshing token & URLs using setup code...");
   if (setupDevice(setupCode)) {
     Serial.println("🎉 Setup complete. Ready for NFC scanning!");
