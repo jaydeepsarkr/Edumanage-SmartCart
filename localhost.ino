@@ -7,7 +7,7 @@
 #include <WiFiManager.h>
 #include <FS.h>
 #include <ArduinoJson.h>
-#include <WiFiClientSecure.h>
+#include <WiFiClient.h>
 
 
 bool setupDevice(String setupCode);
@@ -35,9 +35,8 @@ String macAddress = "";
 String chipId = "";
 String localIp = "";
 
-String setupUrl = "https://app.educanium.com/api/devices/setup";
-// ===== HEARTBEAT =====
-String heartbeatUrl = "https://app.educanium.com/api/devices/heartbeat";
+String setupUrl = "http://192.168.0.131:5000/api/devices/setup";
+String heartbeatUrl = "http://192.168.0.131:5000/api/devices/heartbeat";
 
 
 unsigned long lastHeartbeat = 0;
@@ -312,8 +311,7 @@ void sendHeartbeat() {
 
   if (WiFi.status() != WL_CONNECTED) return;
 
-  WiFiClientSecure client;
-  client.setInsecure();   // ESP8266: skip TLS cert validation
+WiFiClient client;
 
   HTTPClient http;
 
@@ -390,8 +388,7 @@ bool setupDevice(String setupCode) {
 
   if (WiFi.status() != WL_CONNECTED) return false;
 
-  WiFiClientSecure client;
-  client.setInsecure();   // ESP8266: disable cert validation
+ WiFiClient client;
 
   HTTPClient http;
 
@@ -516,9 +513,7 @@ bool sendTextToServer(String text) {
     return false;
   }
 
-  // ===== HTTPS CLIENT =====
-  WiFiClientSecure client;
-  client.setInsecure();   // ESP8266 TLS
+WiFiClient client;
 
   HTTPClient http;
 
